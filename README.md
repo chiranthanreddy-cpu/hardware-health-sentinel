@@ -27,10 +27,17 @@ Run once:
 python sentinel.py
 ```
 
-## Auto-Scheduling
-To have this run in the background every 30 minutes:
-1. Open PowerShell as Administrator.
-2. Run the setup script:
+## Auto-Scheduling (Background Mode)
+To have this monitor run silently in the background every 30 minutes:
+
+1. **Open PowerShell as Administrator** (Right-click Start > Terminal (Admin) or PowerShell (Admin)).
+2. Navigate to this folder:
    ```powershell
-   ./schedule_sentinel.ps1
+   cd "C:\Users\chiru\hardware-health-sentinel"
    ```
+3. Run the setup script:
+   ```powershell
+   Set-ExecutionPolicy Bypass -Scope Process -Force; ./schedule_sentinel.ps1
+   ```
+
+*Note: The task is configured to use `pythonw.exe` so it will run completely in the background without any terminal windows flashing.*
