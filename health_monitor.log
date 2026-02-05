@@ -1,2 +1,17 @@
 2026-02-05 15:58:57,737 - INFO - --- Hardware Health Sentinel Started ---
 2026-02-05 15:58:58,738 - INFO - Status: Battery 96% (Charging), CPU 9.2%
+2026-02-05 16:05:29,240 - INFO - --- Sentinel Diagnostic Cycle Started ---
+2026-02-05 16:05:31,220 - INFO - Resources: CPU 6.7%, RAM 37.7%
+2026-02-05 16:05:31,221 - INFO - Network: Latency 32ms, IP 103.117.238.226
+2026-02-05 16:05:31,221 - INFO - Battery: 96% (Charging), Wear: N/A
+2026-02-05 16:05:31,221 - INFO - --- Cycle Complete ---
+2026-02-05 16:15:29,876 - INFO - --- Sentinel Diagnostic Cycle Started ---
+2026-02-05 16:15:31,918 - INFO - Resources: CPU 7.8%, RAM 37.8%
+2026-02-05 16:15:31,945 - INFO - Network: Latency 49ms, IP 103.117.238.226
+2026-02-05 16:15:31,945 - INFO - Battery: 96% (Discharging), Wear: N/A
+2026-02-05 16:15:31,946 - INFO - --- Cycle Complete ---
+2026-02-05 16:20:58,414 - INFO - --- Sentinel Diagnostic Cycle Started ---
+2026-02-05 16:21:00,331 - INFO - Resources: CPU 5.6%, RAM 37.8%
+2026-02-05 16:21:00,331 - INFO - Network: Latency 20ms, IP 103.117.238.226
+2026-02-05 16:21:00,331 - INFO - Battery: 94% (Discharging), Wear: N/A
+2026-02-05 16:21:00,332 - INFO - --- Cycle Complete ---

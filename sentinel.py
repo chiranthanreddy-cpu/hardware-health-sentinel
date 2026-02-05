@@ -5,6 +5,7 @@ import requests
 import wmi
 import pythoncom
 import socket
+import ctypes
 from plyer import notification
 from datetime import datetime
 
@@ -12,12 +13,12 @@ from datetime import datetime
 CONFIG = {
     "THRESHOLDS": {
         "CPU_PERCENT": 90.0,
-        "RAM_PERCENT": 85.0,
+        "RAM_PERCENT": 80.0,  # Lowered slightly to trigger optimization earlier
         "DISK_PERCENT": 90.0,
         "BATTERY_LOW": 25,
     },
     "TIMEOUTS": {
-        "NETWORK": 5,  # Seconds
+        "NETWORK": 5,
     },
     "LOG_FILE": "health_monitor.log"
 }
@@ -144,9 +145,43 @@ class SentinelMonitor:
 
         return {"percent": percent, "plugged": plugged, "health": health_info}
 
+    def optimize_memory(self):
+        """Safely requests Windows to reclaim unused memory from processes."""
+        logging.info("Initiating Memory Optimization (Working Set Trim)...")
+        count = 0
+        
+        # Windows API Constants
+        # PROCESS_QUERY_INFORMATION (0x0400) | PROCESS_SET_QUOTA (0x0100)
+        PROCESS_ACCESS = 0x0400 | 0x0100
+        
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    # We try to open the process and trim its working set
+                    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_ACCESS, False, proc.info['pid'])
+                    if handle:
+                        ctypes.windll.psapi.EmptyWorkingSet(handle)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+                        count += 1
+                except Exception:
+                    continue # Skip processes we don't have permission for
+            
+            logging.info(f"Memory optimization complete. Requested trim on {count} processes.")
+        except Exception as e:
+            logging.error(f"Memory optimization failed: {e}")
+
     def run_all(self):
         logging.info("--- Sentinel Diagnostic Cycle Started ---")
         res = self.monitor_resources()
+        
+        # If RAM is high, trigger optimization
+        if res['ram'] > CONFIG["THRESHOLDS"]["RAM_PERCENT"]:
+            logging.warning(f"High RAM usage detected ({res['ram']}%). Triggering optimization...")
+            self.optimize_memory()
+            # Re-check RAM after optimization
+            new_ram = psutil.virtual_memory().percent
+            logging.info(f"RAM after optimization: {new_ram}%")
+
         net = self.monitor_network()
         batt = self.monitor_battery()
 
