@@ -6,21 +6,26 @@ import wmi
 import pythoncom
 import socket
 import ctypes
+import os
+import json
 from plyer import notification
 from datetime import datetime
 
 # --- SECURITY & CONFIGURATION ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = {
     "THRESHOLDS": {
         "CPU_PERCENT": 90.0,
-        "RAM_PERCENT": 80.0,  # Lowered slightly to trigger optimization earlier
+        "RAM_PERCENT": 80.0,
         "DISK_PERCENT": 90.0,
         "BATTERY_LOW": 25,
     },
     "TIMEOUTS": {
         "NETWORK": 5,
     },
-    "LOG_FILE": "health_monitor.log"
+    "LOG_FILE": os.path.join(BASE_DIR, "health_monitor.log"),
+    "STATE_FILE": os.path.join(BASE_DIR, "state.json"),
+    "NOTIFICATION_COOLDOWN": 7200  # 2 hours in seconds
 }
 
 # Setup logging
@@ -34,9 +39,41 @@ class SentinelMonitor:
     def __init__(self):
         self.wmi_obj = None
         self.public_ip = "Unknown"
+        self.state = self._load_state()
 
-    def _send_notification(self, title, message):
-        """Internal helper to send sanitized notifications."""
+    def _load_state(self):
+        """Loads the last known state from a JSON file."""
+        if os.path.exists(CONFIG["STATE_FILE"]):
+            try:
+                with open(CONFIG["STATE_FILE"], "r") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"notifications": {}, "last_ip": "Unknown"}
+
+    def _save_state(self):
+        """Saves the current state to a JSON file."""
+        try:
+            with open(CONFIG["STATE_FILE"], "w") as f:
+                json.dump(self.state, f)
+        except Exception as e:
+            logging.error(f"Failed to save state: {e}")
+
+    def _should_notify(self, key):
+        """Checks if enough time has passed since the last notification for a given key."""
+        last_time = self.state["notifications"].get(key, 0)
+        if time.time() - last_time > CONFIG["NOTIFICATION_COOLDOWN"]:
+            self.state["notifications"][key] = time.time()
+            self._save_state()
+            return True
+        return False
+
+    def _send_notification(self, title, message, key=None):
+        """Internal helper to send sanitized notifications with throttling."""
+        if key and not self._should_notify(key):
+            logging.info(f"Notification suppressed (cooldown): {title}")
+            return
+
         # Sanitize inputs to prevent notification injection (though rare in Windows)
         safe_title = "".join(char for char in title if char.isalnum() or char in " -_")
         logging.warning(f"ALERT: {safe_title} - {message}")
@@ -56,20 +93,20 @@ class SentinelMonitor:
         cpu = psutil.cpu_percent(interval=1)
         if cpu > CONFIG["THRESHOLDS"]["CPU_PERCENT"]:
             top_procs = self._get_top_processes("cpu")
-            self._send_notification("High CPU Usage", f"Load: {cpu}%. Top: {top_procs}")
+            self._send_notification("High CPU Usage", f"Load: {cpu}%. Top: {top_procs}", key="cpu_high")
 
         # RAM
         ram = psutil.virtual_memory().percent
         if ram > CONFIG["THRESHOLDS"]["RAM_PERCENT"]:
             top_procs = self._get_top_processes("memory")
-            self._send_notification("High RAM Usage", f"Usage: {ram}%. Top: {top_procs}")
+            self._send_notification("High RAM Usage", f"Usage: {ram}%. Top: {top_procs}", key="ram_high")
 
         # DISK
         for part in psutil.disk_partitions():
             if 'fixed' in part.opts:
                 usage = psutil.disk_usage(part.mountpoint)
                 if usage.percent > CONFIG["THRESHOLDS"]["DISK_PERCENT"]:
-                    self._send_notification("Low Disk Space", f"Drive {part.mountpoint} is {usage.percent}% full.")
+                    self._send_notification("Low Disk Space", f"Drive {part.mountpoint} is {usage.percent}% full.", key=f"disk_low_{part.mountpoint}")
 
         return {"cpu": cpu, "ram": ram}
 
@@ -111,8 +148,16 @@ class SentinelMonitor:
         except Exception:
             new_ip = "Offline"
 
-        if self.public_ip != "Unknown" and new_ip != self.public_ip and new_ip != "Offline":
+        # Use stored IP from state for comparison
+        stored_ip = self.state.get("last_ip", "Unknown")
+        if stored_ip != "Unknown" and new_ip != stored_ip and new_ip != "Offline":
             self._send_notification("Network Change", f"Public IP changed to {new_ip}")
+            self.state["last_ip"] = new_ip
+            self._save_state()
+        elif stored_ip == "Unknown" and new_ip != "Offline":
+             # First run or reset
+             self.state["last_ip"] = new_ip
+             self._save_state()
         
         self.public_ip = new_ip
         return {"latency": latency, "ip": new_ip}
@@ -127,7 +172,7 @@ class SentinelMonitor:
         percent = battery.percent
         plugged = battery.power_plugged
         if percent < CONFIG["THRESHOLDS"]["BATTERY_LOW"] and not plugged:
-            self._send_notification("Low Battery", f"Level: {percent}%. Please connect power.")
+            self._send_notification("Low Battery", f"Level: {percent}%. Please connect power.", key="battery_low")
 
         # Deep health (WMI)
         health_info = {}
