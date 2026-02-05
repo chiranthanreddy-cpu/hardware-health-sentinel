@@ -1,74 +1,162 @@
 import psutil
 import time
 import logging
-import os
+import requests
+import wmi
+import pythoncom
+import socket
 from plyer import notification
 from datetime import datetime
 
+# --- SECURITY & CONFIGURATION ---
+CONFIG = {
+    "THRESHOLDS": {
+        "CPU_PERCENT": 90.0,
+        "RAM_PERCENT": 85.0,
+        "DISK_PERCENT": 90.0,
+        "BATTERY_LOW": 25,
+    },
+    "TIMEOUTS": {
+        "NETWORK": 5,  # Seconds
+    },
+    "LOG_FILE": "health_monitor.log"
+}
+
 # Setup logging
-LOG_FILE = "health_monitor.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler(CONFIG["LOG_FILE"]), logging.StreamHandler()]
 )
 
-def send_alert(title, message):
-    logging.warning(f"ALERT: {title} - {message}")
-    try:
-        notification.notify(
-            title=title,
-            message=message,
-            app_name="Sentinel Health Monitor",
-            timeout=10
-        )
-    except Exception as e:
-        logging.error(f"Failed to send notification: {e}")
+class SentinelMonitor:
+    def __init__(self):
+        self.wmi_obj = None
+        self.public_ip = "Unknown"
 
-def check_battery():
-    battery = psutil.sensors_battery()
-    if battery is None:
-        return # No battery detected (e.g., Desktop PC)
-    
-    percent = battery.percent
-    power_plugged = battery.power_plugged
-    
-    # Alert if battery < 25% and not charging
-    if percent < 25 and not power_plugged:
-        send_alert("Low Battery Warning", f"Battery is at {percent}%. Please plug in your charger.")
-    
-    return percent, power_plugged
+    def _send_notification(self, title, message):
+        """Internal helper to send sanitized notifications."""
+        # Sanitize inputs to prevent notification injection (though rare in Windows)
+        safe_title = "".join(char for char in title if char.isalnum() or char in " -_")
+        logging.warning(f"ALERT: {safe_title} - {message}")
+        try:
+            notification.notify(
+                title=safe_title,
+                message=message[:200], # Limit message length
+                app_name="Sentinel Monitor",
+                timeout=7
+            )
+        except Exception as e:
+            logging.error(f"Notification error: {e}")
 
-def check_cpu():
-    cpu_usage = psutil.cpu_percent(interval=1)
-    
-    # Alert if CPU usage is very high
-    if cpu_usage > 90:
-        send_alert("High CPU Usage", f"System is under heavy load: {cpu_usage}% usage.")
-    
-    return cpu_usage
+    def monitor_resources(self):
+        """Checks CPU, RAM, and Disk usage."""
+        # CPU
+        cpu = psutil.cpu_percent(interval=1)
+        if cpu > CONFIG["THRESHOLDS"]["CPU_PERCENT"]:
+            top_procs = self._get_top_processes("cpu")
+            self._send_notification("High CPU Usage", f"Load: {cpu}%. Top: {top_procs}")
 
-def main():
-    logging.info("--- Hardware Health Sentinel Started ---")
-    
-    # In a scheduled/service context, we might run this once or in a loop
-    # For a "QoL" upgrade, checking every 5 minutes is efficient
-    try:
-        batt_status = check_battery()
-        cpu_status = check_cpu()
-        
-        if batt_status:
-            percent, plugged = batt_status
-            status = "Charging" if plugged else "Discharging"
-            logging.info(f"Status: Battery {percent}% ({status}), CPU {cpu_status}%")
-        else:
-            logging.info(f"Status: CPU {cpu_status}% (No battery detected)")
+        # RAM
+        ram = psutil.virtual_memory().percent
+        if ram > CONFIG["THRESHOLDS"]["RAM_PERCENT"]:
+            top_procs = self._get_top_processes("memory")
+            self._send_notification("High RAM Usage", f"Usage: {ram}%. Top: {top_procs}")
+
+        # DISK
+        for part in psutil.disk_partitions():
+            if 'fixed' in part.opts:
+                usage = psutil.disk_usage(part.mountpoint)
+                if usage.percent > CONFIG["THRESHOLDS"]["DISK_PERCENT"]:
+                    self._send_notification("Low Disk Space", f"Drive {part.mountpoint} is {usage.percent}% full.")
+
+        return {"cpu": cpu, "ram": ram}
+
+    def _get_top_processes(self, sort_by="cpu"):
+        """Safely retrieves top processes by resource usage."""
+        procs = []
+        try:
+            for p in psutil.process_iter(['name', 'cpu_percent', 'memory_percent']):
+                try:
+                    procs.append(p.info)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
             
-    except Exception as e:
-        logging.error(f"Error during health check: {e}")
+            sort_key = 'cpu_percent' if sort_by == "cpu" else 'memory_percent'
+            top = sorted(procs, key=lambda x: x[sort_key] or 0, reverse=True)[:3]
+            return ", ".join([f"{p['name']} ({p[sort_key]:.1f}%)" for p in top])
+        except Exception:
+            return "Unknown"
+
+    def monitor_network(self):
+        """Checks latency and public IP stability."""
+        # Latency check (Safe socket connection instead of shell ping)
+        latency = "Timeout"
+        try:
+            start = time.time()
+            socket.create_connection(("8.8.8.8", 53), timeout=CONFIG["TIMEOUTS"]["NETWORK"])
+            latency = f"{(time.time() - start) * 1000:.0f}ms"
+        except (socket.timeout, Exception):
+            latency = "Offline"
+
+        # IP check (with timeout and error handling)
+        new_ip = "Unknown"
+        try:
+            response = requests.get("https://api.ipify.org", timeout=CONFIG["TIMEOUTS"]["NETWORK"])
+            if response.status_code == 200:
+                new_ip = response.text.strip()
+                # Sanitize IP output
+                new_ip = "".join(c for c in new_ip if c.isdigit() or c == '.')
+        except Exception:
+            new_ip = "Offline"
+
+        if self.public_ip != "Unknown" and new_ip != self.public_ip and new_ip != "Offline":
+            self._send_notification("Network Change", f"Public IP changed to {new_ip}")
+        
+        self.public_ip = new_ip
+        return {"latency": latency, "ip": new_ip}
+
+    def monitor_battery(self):
+        """Deep battery analytics using WMI."""
+        battery = psutil.sensors_battery()
+        if not battery:
+            return None
+
+        # Basic status
+        percent = battery.percent
+        plugged = battery.power_plugged
+        if percent < CONFIG["THRESHOLDS"]["BATTERY_LOW"] and not plugged:
+            self._send_notification("Low Battery", f"Level: {percent}%. Please connect power.")
+
+        # Deep health (WMI)
+        health_info = {}
+        try:
+            pythoncom.CoInitialize() # Required for WMI in threads/tasks
+            w = wmi.WMI(namespace="root\\wmi")
+            full_cap = w.ExecQuery("Select FullChargeCapacity from BatteryFullChargedCapacity")[0].FullChargeCapacity
+            design_cap = w.ExecQuery("Select DesignCapacity from BatteryStaticData")[0].DesignCapacity
+            wear = 100 - (full_cap / design_cap * 100)
+            health_info = {"wear": f"{wear:.1f}%", "health_score": f"{100-wear:.1f}%"}
+        except Exception:
+            health_info = {"wear": "N/A", "health_score": "N/A"}
+        finally:
+            pythoncom.CoUninitialize()
+
+        return {"percent": percent, "plugged": plugged, "health": health_info}
+
+    def run_all(self):
+        logging.info("--- Sentinel Diagnostic Cycle Started ---")
+        res = self.monitor_resources()
+        net = self.monitor_network()
+        batt = self.monitor_battery()
+
+        logging.info(f"Resources: CPU {res['cpu']}%, RAM {res['ram']}%")
+        logging.info(f"Network: Latency {net['latency']}, IP {net['ip']}")
+        if batt:
+            logging.info(f"Battery: {batt['percent']}% ({'Charging' if batt['plugged'] else 'Discharging'}), Wear: {batt['health']['wear']}")
+        
+        logging.info("--- Cycle Complete ---")
 
 if __name__ == "__main__":
-    main()
+    monitor = SentinelMonitor()
+    monitor.run_all()
